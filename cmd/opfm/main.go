@@ -20,6 +20,10 @@ import (
 	"github.com/debonzi/op-file-manager/internal/opclient"
 )
 
+// version is replaced at build time for release binaries with
+// -ldflags "-X main.version=vX.Y.Z".
+var version = "dev"
+
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "opfm:", err)
@@ -232,7 +236,11 @@ func runTUI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		}
 	}
 
-	info := app.ContextInfo{AccountName: firstNonEmpty(account.Name, account.ID), VaultName: configuredVaultName(ctx, client, cfg.VaultID)}
+	info := app.ContextInfo{
+		AccountName:  firstNonEmpty(account.Name, account.ID),
+		VaultName:    configuredVaultName(ctx, client, cfg.VaultID),
+		BuildVersion: version,
+	}
 	model := app.New(ctx, client, cfg, root, info)
 	program := tea.NewProgram(model, tea.WithOutput(stdout))
 	_, err = program.Run()

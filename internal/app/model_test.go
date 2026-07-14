@@ -229,12 +229,12 @@ func TestViewRendersContextualTreeAndActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := New(context.Background(), opclient.New("op"), config.Config{Version: 1, AccountID: "account", VaultID: "vault"}, root, ContextInfo{AccountName: "Personal", VaultName: "Secrets"})
+	model := New(context.Background(), opclient.New("op"), config.Config{Version: 1, AccountID: "account", VaultID: "vault"}, root, ContextInfo{AccountName: "Personal", VaultName: "Secrets", BuildVersion: "v1.2.3"})
 	model.width, model.height = 100, 20
 	model.remoteLoading = false
 	model.tree = domain.BuildTree([]domain.Document{{ID: "doc", Title: ".env", Size: 12, UpdatedAt: "2026-07-14T00:00:00Z"}})
 	content := ansiEscapePattern.ReplaceAllString(model.View().Content, "")
-	for _, wanted := range []string{"ACCOUNT: Personal", "VAULT: Secrets", "SESSION: CONNECTED", "LOCAL:", "REMOTE:", "LOCAL TREE  DEST .  [1]", "REMOTE TREE  DEST /  [1]", documentIcon, "<F5> Upload", "<Enter> Toggle", "<d> Details", "____  ____  ________", "<local>", "<remote>"} {
+	for _, wanted := range []string{"ACCOUNT: Personal", "VAULT: Secrets", "SESSION: CONNECTED", "LOCAL:", "REMOTE:", "LOCAL TREE  DEST .  [1]", "REMOTE TREE  DEST /  [1]", documentIcon, "<F5> Upload", "<Enter> Toggle", "<d> Details", "____  ____  ________", "<local>", "<remote>", "v1.2.3", "L:1  R:1"} {
 		if !strings.Contains(content, wanted) {
 			t.Fatalf("view does not contain %q:\n%s", wanted, content)
 		}

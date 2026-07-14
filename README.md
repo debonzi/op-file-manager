@@ -63,6 +63,26 @@ If 1Password has not been authenticated for the current process, press `s` in
 the TUI. `opfm` delegates authentication to `op` and requests the normal
 1Password CLI sign-in flow.
 
+### Install a release
+
+Every stable GitHub release includes Linux `amd64` and `arm64` archives plus a
+`checksums.txt` file. Replace the version and architecture below as needed:
+
+```sh
+VERSION=v1.0.0
+ARCH=amd64
+BASE="https://github.com/debonzi/op-file-manager/releases/download/${VERSION}"
+
+curl -LO "${BASE}/opfm_${VERSION}_linux_${ARCH}.tar.gz"
+curl -LO "${BASE}/checksums.txt"
+sha256sum -c checksums.txt
+tar -xzf "opfm_${VERSION}_linux_${ARCH}.tar.gz"
+install -m 0755 "opfm_${VERSION}_linux_${ARCH}/opfm" ~/.local/bin/opfm
+```
+
+Release binaries show their version in the bottom-right status bar. Builds made
+without an injected version show `dev`.
+
 ## How the remote tree works
 
 1Password Documents are the source of truth. `opfm` maps a slash-separated
@@ -165,6 +185,8 @@ go test -race ./...
 go vet ./...
 go build ./cmd/opfm
 ```
+
+To inject a version in a local binary, use `make build VERSION=v1.2.3`.
 
 For interactive checks, run the built binary inside `tmux`. Never include
 session tokens, passwords, document contents, or other secret material in

@@ -30,8 +30,9 @@ const (
 // ContextInfo contains friendly metadata shown in the header. It intentionally
 // excludes any Document content and is safe to retain for a TUI session.
 type ContextInfo struct {
-	AccountName string
-	VaultName   string
+	AccountName  string
+	VaultName    string
+	BuildVersion string
 }
 
 type interactionMode int
@@ -1186,11 +1187,16 @@ func (m *Model) renderFooter(width int) string {
 	remoteCount := len(m.remoteRows())
 	localTag := styles.footerTag(m.focus == FocusLocal).Render("<local>")
 	remoteTag := styles.footerTag(m.focus == FocusRemote).Render("<remote>")
-	counts := styles.muted.Render(fmt.Sprintf("L:%d  R:%d", localCount, remoteCount))
-	statusWidth := max(8, width-lipgloss.Width(localTag)-lipgloss.Width(remoteTag)-lipgloss.Width(counts)-5)
+	rightParts := []string{}
+	if m.context.BuildVersion != "" {
+		rightParts = append(rightParts, m.context.BuildVersion)
+	}
+	rightParts = append(rightParts, fmt.Sprintf("L:%d  R:%d", localCount, remoteCount))
+	right := styles.muted.Render(strings.Join(rightParts, "  "))
+	statusWidth := max(8, width-lipgloss.Width(localTag)-lipgloss.Width(remoteTag)-lipgloss.Width(right)-5)
 	status := styles.status.Render(fit(displayName(m.status), statusWidth))
 	line := localTag + " " + remoteTag + "  " + status
-	line += strings.Repeat(" ", max(1, width-lipgloss.Width(line)-lipgloss.Width(counts))) + counts
+	line += strings.Repeat(" ", max(1, width-lipgloss.Width(line)-lipgloss.Width(right))) + right
 	return padDisplay(line, width)
 }
 
