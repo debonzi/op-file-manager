@@ -9,6 +9,7 @@
 
 - Linux
 - Terminal with at least 80×20 cells
+- Terminal using a Nerd Font (for file and folder icons)
 - Go 1.25 or later to build
 - 1Password CLI with `document` commands available
 - A manually configured 1Password account for headless sign-in, or an active `op` session
@@ -31,24 +32,24 @@ At runtime, `opfm` inherits an existing 1Password CLI session or signs in throug
 | --- | --- |
 | `Tab` | Switch panel |
 | arrows or `j`/`k` | Select entry |
-| `Enter`, `→`, or `l` | Open directory (a selected file has no preview) |
-| `Backspace`, `←`, or `h` | Parent directory |
-| `/` | Filter entries in the focused panel; `Esc` clears the filter |
-| `w` | Toggle compact and wide table columns |
+| `Enter`, `→`, or `l` | Toggle the selected folder; opening it also makes it the active destination for that panel |
+| `←` or `h` | Close the selected folder, or select its parent when it is already closed |
+| `Backspace` | Move the active local/remote destination to its parent |
+| `/` | Filter the focused tree; matching entries and their ancestors remain visible; `Esc` clears it |
 | `d` | Show safe metadata for the selected item |
-| `F5` | Copy selected file to the other panel's current directory |
-| `n` (remote panel) | Create a child remote folder |
+| `F5` | Copy selected file to the other panel's active destination |
+| `n` (remote panel) | Create a child folder in the active remote destination |
 | `Ctrl+D` (remote panel) | Archive a Document, or permanently remove a selected empty marker folder |
 | `r` | Refresh remote metadata |
 | `s` | Sign in through 1Password CLI |
 | `?` | Show keyboard help |
 | `q` | Quit |
 
-An existing destination is never replaced until `y` or `Enter` confirms the modal.
+An existing destination is never replaced until `y` or `Enter` confirms the modal. Each pane is a rooted tree: opening a local folder selects the destination for downloads, while opening a remote folder selects the destination for uploads and new folders. A remote destination stays active when its branch is later closed and is marked `DEST` in the tree.
 
 ## Appearance
 
-opfm always inherits the terminal background, including terminal transparency. The main view keeps account, vault, session, and both current paths visible above two framed file tables; a compact ASCII opfm mark appears at wide terminal sizes. Focus uses semantic text color, borders, bold, and underline without painting an opaque background.
+opfm always inherits the terminal background, including terminal transparency. The main view keeps account, vault, session, and both active paths visible above two framed Neo-tree-style file trees. The tree uses periwinkle folders, lavender files, muted blue-gray guides, and a green left gutter for the selected row; it never paints an opaque background. Nerd Font icons distinguish open/closed folders, documents, symbolic links, and invalid items; a compact ASCII opfm mark appears at wide terminal sizes.
 
 ## Remote-path convention
 
@@ -56,7 +57,7 @@ Every file created by opfm is a 1Password Document. Its title is its virtual, re
 
 Paths may contain up to 200 Unicode code points and cannot be absolute or include empty, `.` or `..` segments. Documents with invalid or duplicate titles remain visible in the remote pane but are read-only in opfm. Directories containing files are inferred from titles; empty directories need the explicit marker described below.
 
-To persist an empty remote directory, focus the remote pane, navigate to its parent, and press `n`. opfm creates a zero-content Document titled `directory/`, with the file name `.opfm-directory` and the tag `opfm:directory-marker`. Those marker Documents are never displayed as files. You can create a nested structure one level at a time; after each successful creation opfm opens the new directory. `Ctrl+D` permanently deletes only a selected marker directory that is empty—never a regular Document, an implied directory, or a directory containing children. On a regular remote Document, `Ctrl+D` archives it in 1Password instead of deleting it permanently.
+To persist an empty remote directory, focus the remote pane, open its parent in the tree, and press `n`. opfm creates a zero-content Document titled `directory/`, with the file name `.opfm-directory` and the tag `opfm:directory-marker`. Those marker Documents are never displayed as files. You can create a nested structure one level at a time; after each successful creation opfm keeps the parent as the active destination, expands it, and selects the new directory. `Ctrl+D` permanently deletes only a selected marker directory that is empty—never a regular Document, an implied directory, or a directory containing children. On a regular remote Document, `Ctrl+D` archives it in 1Password instead of deleting it permanently.
 
 ## Safety boundaries
 

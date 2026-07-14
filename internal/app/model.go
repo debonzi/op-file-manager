@@ -63,7 +63,8 @@ type Model struct {
 	remoteCursor      int
 	localFilter       string
 	remoteFilter      string
-	wide              bool
+	localExpanded     map[string]bool
+	remoteExpanded    map[string]bool
 	pendingCreatedDir []string
 
 	tree           domain.Tree
@@ -111,6 +112,24 @@ type detail struct {
 	lines []string
 }
 
+// treeRow is a visible, metadata-only entry in one browser tree. It retains
+// the canonical path independently from its rendered name, so selection and
+// destructive actions cannot be confused by indentation or icon glyphs.
+type treeRow struct {
+	key           string
+	parentKey     string
+	name          string
+	localPath     string
+	remotePath    []string
+	local         *localfs.Entry
+	remote        *domain.Entry
+	isDir         bool
+	isSymlink     bool
+	invalid       bool
+	last          bool
+	ancestorLasts []bool
+}
+
 type documentsLoadedMsg struct {
 	tree domain.Tree
 	err  error
@@ -127,15 +146,17 @@ type removalFinishedMsg struct{ err error }
 
 func New(ctx context.Context, client *opclient.Client, cfg config.Config, root localfs.Root, info ContextInfo) *Model {
 	return &Model{
-		ctx:           ctx,
-		client:        client,
-		config:        cfg,
-		root:          root,
-		context:       info,
-		localDir:      ".",
-		tree:          domain.BuildTree(nil),
-		remoteLoading: true,
-		status:        "Loading document metadata…",
+		ctx:            ctx,
+		client:         client,
+		config:         cfg,
+		root:           root,
+		context:        info,
+		localDir:       ".",
+		localExpanded:  map[string]bool{},
+		remoteExpanded: map[string]bool{},
+		tree:           domain.BuildTree(nil),
+		remoteLoading:  true,
+		status:         "Loading document metadata…",
 	}
 }
 
@@ -153,7 +174,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = safeError(msg.err)
 			return m, nil
 		}
+		selectedKey := ""
+		if row, ok := m.selectedRemoteRow(); ok {
+			selectedKey = row.key
+		}
 		m.tree = msg.tree
+		m.ensureRemoteDestination()
+		m.selectRemoteRow(selectedKey)
 		m.clampCursors()
 		if len(m.pendingCreatedDir) > 0 {
 			created := append([]string(nil), m.pendingCreatedDir...)
@@ -187,6 +214,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingCreatedDir = append([]string(nil), msg.dir...)
 			m.status = "Remote folder created; refreshing document metadata…"
 		} else {
+			m.handleRemovedRemoteDirectory(msg.dir)
 			m.status = "Remote folder removed; refreshing document metadata…"
 		}
 		m.remoteLoading = true
@@ -270,14 +298,6 @@ func (m *Model) handleKey(key, text string) (tea.Model, tea.Cmd) {
 	case "?":
 		m.mode = modeHelp
 		return m, nil
-	case "w":
-		m.wide = !m.wide
-		if m.wide {
-			m.status = "Wide table mode enabled"
-		} else {
-			m.status = "Compact table mode enabled"
-		}
-		return m, nil
 	case "/":
 		m.mode = modeFilter
 		m.input = m.currentFilter()
@@ -289,8 +309,11 @@ func (m *Model) handleKey(key, text string) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.moveCursor(1)
 		return m, nil
-	case "backspace", "left", "h":
-		m.upDirectory()
+	case "backspace":
+		m.activateParentDirectory()
+		return m, nil
+	case "left", "h":
+		m.closeOrSelectParent()
 		return m, nil
 	case "enter", "right", "l":
 		m.openSelected()
@@ -418,6 +441,7 @@ func (m *Model) beginCreateDirectory() {
 		m.status = "Wait for document metadata to finish loading"
 		return
 	}
+	m.remoteFilter = ""
 	m.mode = modeNewFolder
 	m.input = ""
 	m.status = "Type one folder name and press Enter"
@@ -433,41 +457,142 @@ func (m *Model) loadDocuments() tea.Cmd {
 	}
 }
 
-func (m *Model) localEntries() ([]localfs.Entry, error) {
-	return m.root.List(m.localDir)
+func localTreeKey(path string) string {
+	path = filepath.Clean(path)
+	if path == "." {
+		return ""
+	}
+	return filepath.ToSlash(path)
 }
 
-func (m *Model) filteredLocalEntries() ([]localfs.Entry, error) {
-	entries, err := m.localEntries()
-	if err != nil {
+func remoteTreeKey(path []string) string { return strings.Join(path, "/") }
+
+func (m *Model) localRows() ([]treeRow, error) {
+	includeCollapsedDescendants := m.localFilter != ""
+	rows := make([]treeRow, 0)
+	var walk func(string, string, bool) error
+	walk = func(dir, parentKey string, nested bool) error {
+		entries, err := m.root.List(dir)
+		if err != nil {
+			if !nested {
+				return err
+			}
+			rows = append(rows, treeRow{
+				key:       parentKey + "\x00unreadable",
+				parentKey: parentKey,
+				name:      "(cannot read directory)",
+				invalid:   true,
+			})
+			return nil
+		}
+		for index := range entries {
+			entry := &entries[index]
+			path := filepath.Join(dir, entry.Name)
+			key := localTreeKey(path)
+			rows = append(rows, treeRow{
+				key:       key,
+				parentKey: parentKey,
+				name:      entry.Name,
+				localPath: path,
+				local:     entry,
+				isDir:     entry.IsDir,
+				isSymlink: entry.IsSymlink,
+			})
+			if entry.IsDir && !entry.IsSymlink && (includeCollapsedDescendants || m.localExpanded[key]) {
+				if err := walk(path, key, true); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(".", "", false); err != nil {
 		return nil, err
 	}
-	if m.localFilter == "" {
-		return entries, nil
-	}
-	filtered := make([]localfs.Entry, 0, len(entries))
-	for _, entry := range entries {
-		if matchesFilter(entry.Name, m.localFilter) {
-			filtered = append(filtered, entry)
-		}
-	}
-	return filtered, nil
+	return filterAndShapeTreeRows(rows, m.localFilter), nil
 }
 
-func (m *Model) remoteEntries() []domain.Entry { return m.tree.Entries(m.remoteDir) }
-
-func (m *Model) filteredRemoteEntries() []domain.Entry {
-	entries := m.remoteEntries()
-	if m.remoteFilter == "" {
-		return entries
-	}
-	filtered := make([]domain.Entry, 0, len(entries))
-	for _, entry := range entries {
-		if matchesFilter(entry.Name, m.remoteFilter) {
-			filtered = append(filtered, entry)
+func (m *Model) remoteRows() []treeRow {
+	includeCollapsedDescendants := m.remoteFilter != ""
+	rows := make([]treeRow, 0)
+	invalidIndex := 0
+	var walk func([]string, string)
+	walk = func(dir []string, parentKey string) {
+		entries := m.tree.Entries(dir)
+		for index := range entries {
+			entry := &entries[index]
+			path := append(append([]string(nil), dir...), entry.Name)
+			key := remoteTreeKey(path)
+			if entry.Invalid {
+				key = fmt.Sprintf("\x00invalid:%d", invalidIndex)
+				invalidIndex++
+				path = nil
+			}
+			rows = append(rows, treeRow{
+				key:        key,
+				parentKey:  parentKey,
+				name:       entry.Name,
+				remotePath: path,
+				remote:     entry,
+				isDir:      entry.IsDir,
+				invalid:    entry.Invalid,
+			})
+			if entry.IsDir && (includeCollapsedDescendants || m.remoteExpanded[key]) {
+				walk(path, key)
+			}
 		}
 	}
-	return filtered
+	walk(nil, "")
+	return filterAndShapeTreeRows(rows, m.remoteFilter)
+}
+
+// filterAndShapeTreeRows preserves every matching node and its ancestors. A
+// filter temporarily reveals descendants without mutating the expanded maps.
+func filterAndShapeTreeRows(rows []treeRow, filter string) []treeRow {
+	if filter != "" {
+		byKey := make(map[string]treeRow, len(rows))
+		include := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			byKey[row.key] = row
+			if matchesFilter(row.name, filter) {
+				for key := row.key; key != ""; {
+					include[key] = true
+					key = byKey[key].parentKey
+				}
+			}
+		}
+		filtered := make([]treeRow, 0, len(rows))
+		for _, row := range rows {
+			if include[row.key] {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+	return shapeTreeRows(rows)
+}
+
+func shapeTreeRows(rows []treeRow) []treeRow {
+	byKey := make(map[string]treeRow, len(rows))
+	lastChild := make(map[string]int, len(rows))
+	for index, row := range rows {
+		byKey[row.key] = row
+		lastChild[row.parentKey] = index
+	}
+	for index := range rows {
+		rows[index].last = lastChild[rows[index].parentKey] == index
+		ancestors := make([]bool, 0)
+		for parentKey := rows[index].parentKey; parentKey != ""; {
+			parent, ok := byKey[parentKey]
+			if !ok {
+				break
+			}
+			ancestors = append([]bool{parent.last}, ancestors...)
+			parentKey = parent.parentKey
+		}
+		rows[index].ancestorLasts = ancestors
+	}
+	return rows
 }
 
 func matchesFilter(name, filter string) bool {
@@ -476,24 +601,24 @@ func matchesFilter(name, filter string) bool {
 
 func (m *Model) moveCursor(delta int) {
 	if m.focus == FocusLocal {
-		entries, err := m.filteredLocalEntries()
-		if err != nil || len(entries) == 0 {
+		rows, err := m.localRows()
+		if err != nil || len(rows) == 0 {
 			return
 		}
-		m.localCursor = clamp(m.localCursor+delta, 0, len(entries)-1)
+		m.localCursor = clamp(m.localCursor+delta, 0, len(rows)-1)
 		return
 	}
-	entries := m.filteredRemoteEntries()
-	if len(entries) > 0 {
-		m.remoteCursor = clamp(m.remoteCursor+delta, 0, len(entries)-1)
+	rows := m.remoteRows()
+	if len(rows) > 0 {
+		m.remoteCursor = clamp(m.remoteCursor+delta, 0, len(rows)-1)
 	}
 }
 
 func (m *Model) clampCursors() {
-	if entries, err := m.filteredLocalEntries(); err == nil {
-		m.localCursor = clampCursor(m.localCursor, len(entries))
+	if rows, err := m.localRows(); err == nil {
+		m.localCursor = clampCursor(m.localCursor, len(rows))
 	}
-	m.remoteCursor = clampCursor(m.remoteCursor, len(m.filteredRemoteEntries()))
+	m.remoteCursor = clampCursor(m.remoteCursor, len(m.remoteRows()))
 }
 
 func clampCursor(cursor, entries int) int {
@@ -505,65 +630,155 @@ func clampCursor(cursor, entries int) int {
 
 func (m *Model) openSelected() {
 	if m.focus == FocusLocal {
-		entry, ok, err := m.selectedLocal()
+		row, ok, err := m.selectedLocalRow()
 		if err != nil || !ok {
 			return
 		}
-		if entry.IsDir && !entry.IsSymlink {
-			m.localDir = filepath.Join(m.localDir, entry.Name)
-			m.localCursor = 0
-			m.localFilter = ""
+		if row.isDir && !row.isSymlink {
+			if m.localExpanded[row.key] {
+				delete(m.localExpanded, row.key)
+				m.selectLocalRow(row.key)
+				m.status = "Local folder closed"
+			} else {
+				m.localExpanded[row.key] = true
+				m.localDir = row.localPath
+				m.status = "Local folder opened; it is the download destination"
+			}
 			return
 		}
 		m.status = "Selected entry is a file; press F5 to copy it"
 		return
 	}
-	entry, ok := m.selectedRemote()
+	row, ok := m.selectedRemoteRow()
 	if !ok {
 		return
 	}
-	if entry.IsDir {
-		m.remoteDir = append(m.remoteDir, entry.Name)
-		m.remoteCursor = 0
-		m.remoteFilter = ""
+	if row.isDir {
+		if m.remoteExpanded[row.key] {
+			delete(m.remoteExpanded, row.key)
+			m.selectRemoteRow(row.key)
+			m.status = "Remote folder closed; it remains the upload destination"
+		} else {
+			m.remoteExpanded[row.key] = true
+			m.remoteDir = append([]string(nil), row.remotePath...)
+			m.status = "Remote folder opened; it is the upload destination"
+		}
 		return
 	}
 	m.status = "No document preview; press F5 to copy the selected file"
 }
 
-func (m *Model) upDirectory() {
+func (m *Model) closeOrSelectParent() {
 	if m.focus == FocusLocal {
-		if m.localDir != "." {
-			m.localDir = filepath.Dir(m.localDir)
-			if m.localDir == "" {
-				m.localDir = "."
-			}
-			m.localCursor = 0
-			m.localFilter = ""
+		row, ok, err := m.selectedLocalRow()
+		if err != nil || !ok {
+			return
 		}
+		if row.isDir && !row.isSymlink && m.localExpanded[row.key] {
+			delete(m.localExpanded, row.key)
+			m.selectLocalRow(row.key)
+			m.status = "Local folder closed"
+			return
+		}
+		m.selectLocalRow(row.parentKey)
 		return
 	}
-	if len(m.remoteDir) > 0 {
-		m.remoteDir = m.remoteDir[:len(m.remoteDir)-1]
-		m.remoteCursor = 0
-		m.remoteFilter = ""
+	row, ok := m.selectedRemoteRow()
+	if !ok {
+		return
 	}
+	if row.isDir && m.remoteExpanded[row.key] {
+		delete(m.remoteExpanded, row.key)
+		m.selectRemoteRow(row.key)
+		m.status = "Remote folder closed"
+		return
+	}
+	m.selectRemoteRow(row.parentKey)
+}
+
+func (m *Model) activateParentDirectory() {
+	if m.focus == FocusLocal {
+		if m.localDir == "." {
+			return
+		}
+		m.localDir = filepath.Dir(m.localDir)
+		if m.localDir == "" {
+			m.localDir = "."
+		}
+		m.selectLocalRow(localTreeKey(m.localDir))
+		m.status = "Local download destination moved to parent"
+		return
+	}
+	if len(m.remoteDir) == 0 {
+		return
+	}
+	m.remoteDir = m.remoteDir[:len(m.remoteDir)-1]
+	m.selectRemoteRow(remoteTreeKey(m.remoteDir))
+	m.status = "Remote upload destination moved to parent"
+}
+
+func (m *Model) selectedLocalRow() (treeRow, bool, error) {
+	rows, err := m.localRows()
+	if err != nil || len(rows) == 0 {
+		return treeRow{}, false, err
+	}
+	row := rows[clamp(m.localCursor, 0, len(rows)-1)]
+	return row, row.local != nil, nil
+}
+
+func (m *Model) selectedRemoteRow() (treeRow, bool) {
+	rows := m.remoteRows()
+	if len(rows) == 0 {
+		return treeRow{}, false
+	}
+	row := rows[clamp(m.remoteCursor, 0, len(rows)-1)]
+	return row, row.remote != nil
 }
 
 func (m *Model) selectedLocal() (localfs.Entry, bool, error) {
-	entries, err := m.filteredLocalEntries()
-	if err != nil || len(entries) == 0 {
+	row, ok, err := m.selectedLocalRow()
+	if err != nil || !ok {
 		return localfs.Entry{}, false, err
 	}
-	return entries[clamp(m.localCursor, 0, len(entries)-1)], true, nil
+	return *row.local, true, nil
 }
 
 func (m *Model) selectedRemote() (domain.Entry, bool) {
-	entries := m.filteredRemoteEntries()
-	if len(entries) == 0 {
+	row, ok := m.selectedRemoteRow()
+	if !ok {
 		return domain.Entry{}, false
 	}
-	return entries[clamp(m.remoteCursor, 0, len(entries)-1)], true
+	return *row.remote, true
+}
+
+func (m *Model) selectLocalRow(key string) {
+	if key == "" {
+		m.localCursor = 0
+		return
+	}
+	rows, err := m.localRows()
+	if err != nil {
+		return
+	}
+	for index, row := range rows {
+		if row.key == key {
+			m.localCursor = index
+			return
+		}
+	}
+}
+
+func (m *Model) selectRemoteRow(key string) {
+	if key == "" {
+		m.remoteCursor = 0
+		return
+	}
+	for index, row := range m.remoteRows() {
+		if row.key == key {
+			m.remoteCursor = index
+			return
+		}
+	}
 }
 
 func (m *Model) prepareTransfer() (tea.Model, tea.Cmd) {
@@ -672,13 +887,14 @@ func (m *Model) prepareRemoval() (tea.Model, tea.Cmd) {
 		m.status = "Wait for document metadata to finish loading"
 		return m, nil
 	}
-	entry, ok := m.selectedRemote()
+	row, ok := m.selectedRemoteRow()
 	if !ok {
 		m.status = "Select a remote item to archive or remove"
 		return m, nil
 	}
-	if !entry.IsDir {
-		if entry.Invalid || entry.Document == nil {
+	entry := row.remote
+	if !row.isDir {
+		if row.invalid || entry.Document == nil {
 			m.status = "This document has an invalid or duplicate virtual path and is read-only"
 			return m, nil
 		}
@@ -688,7 +904,7 @@ func (m *Model) prepareRemoval() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	dir := append(append([]string(nil), m.remoteDir...), entry.Name)
+	dir := row.remotePath
 	marker := m.tree.EmptyDirectoryMarker(dir)
 	if marker == nil {
 		if m.tree.DirectoryMarker(dir) != nil {
@@ -709,17 +925,19 @@ func (m *Model) executeRemoval(removal *removal) tea.Cmd {
 		if removal.kind == archiveDocument {
 			return removalFinishedMsg{err: m.client.ArchiveDocument(m.ctx, m.config.VaultID, removal.document.ID)}
 		}
-		return directoryFinishedMsg{created: false, err: m.client.DeleteDirectoryMarker(m.ctx, m.config.VaultID, removal.document.ID)}
+		parts, _ := domain.ValidateRemotePath(strings.TrimSuffix(removal.path, "/"))
+		return directoryFinishedMsg{dir: parts, created: false, err: m.client.DeleteDirectoryMarker(m.ctx, m.config.VaultID, removal.document.ID)}
 	}
 }
 
 func (m *Model) showDetails() {
 	if m.focus == FocusLocal {
-		entry, ok, err := m.selectedLocal()
+		row, ok, err := m.selectedLocalRow()
 		if err != nil || !ok {
 			m.status = "Select a local item to view details"
 			return
 		}
+		entry := row.local
 		kind := "regular file"
 		if entry.IsDir {
 			kind = "directory"
@@ -729,7 +947,7 @@ func (m *Model) showDetails() {
 		}
 		m.details = &detail{title: "Local details", lines: []string{
 			"Name: " + displayName(entry.Name),
-			"Path: " + displayName(filepath.Join(m.localDir, entry.Name)),
+			"Path: " + displayName(filepath.ToSlash(row.localPath)),
 			"Type: " + kind,
 			"Size: " + formatSize(entry.Size),
 			"Modified: " + formatLocalTime(entry.Modified),
@@ -739,13 +957,14 @@ func (m *Model) showDetails() {
 		return
 	}
 
-	entry, ok := m.selectedRemote()
+	row, ok := m.selectedRemoteRow()
 	if !ok {
 		m.status = "Select a remote item to view details"
 		return
 	}
-	if entry.IsDir {
-		dir := append(append([]string(nil), m.remoteDir...), entry.Name)
+	entry := row.remote
+	if row.isDir {
+		dir := row.remotePath
 		persistence := "inferred from Documents"
 		if marker := m.tree.DirectoryMarker(dir); marker != nil {
 			persistence = "persistent opfm directory marker"
@@ -931,12 +1150,12 @@ func (m *Model) renderActions(width int) string {
 	default:
 		if m.focus == FocusLocal {
 			actions = []string{
-				shortcut("F5", "Upload"), shortcut("Enter", "Open"), shortcut("Backspace", "Up"), shortcut("/", "Filter"),
+				shortcut("F5", "Upload"), shortcut("Enter", "Toggle"), shortcut("Backspace", "Parent"), shortcut("/", "Filter"),
 				shortcut("d", "Details"), shortcut("r", "Refresh"), shortcut("?", "Help"),
 			}
 		} else {
 			actions = []string{
-				shortcut("F5", "Download"), shortcut("n", "Folder"), shortcut("Ctrl+D", "Archive"), shortcut("Enter", "Open"),
+				shortcut("F5", "Download"), shortcut("n", "Folder"), shortcut("Ctrl+D", "Archive"), shortcut("Enter", "Toggle"),
 				shortcut("/", "Filter"), shortcut("d", "Details"), shortcut("r", "Refresh"), shortcut("?", "Help"),
 			}
 		}
@@ -954,10 +1173,10 @@ func folderSeparator(dir []string, value string) string {
 func (m *Model) renderFooter(width int) string {
 	styles := m.styles()
 	localCount := 0
-	if entries, err := m.filteredLocalEntries(); err == nil {
-		localCount = len(entries)
+	if rows, err := m.localRows(); err == nil {
+		localCount = len(rows)
 	}
-	remoteCount := len(m.filteredRemoteEntries())
+	remoteCount := len(m.remoteRows())
 	localTag := styles.footerTag(m.focus == FocusLocal).Render("<local>")
 	remoteTag := styles.footerTag(m.focus == FocusRemote).Render("<remote>")
 	counts := styles.muted.Render(fmt.Sprintf("L:%d  R:%d", localCount, remoteCount))
@@ -976,52 +1195,21 @@ func (m *Model) renderPanels(width, height int) string {
 }
 
 func (m *Model) renderLocalPanel(width, height int) string {
-	entries, err := m.filteredLocalEntries()
-	title := fmt.Sprintf("LOCAL %s [%d]", displayName(m.localDir), len(entries))
+	rows, err := m.localRows()
+	title := fmt.Sprintf("LOCAL TREE  DEST %s  [%d]", displayName(m.localDir), len(rows))
 	if err != nil {
 		return m.renderFrame(width, height, title, []string{m.styles().error.Render("Cannot read directory")}, m.focus == FocusLocal)
 	}
-	rows := make([]tableRow, 0, len(entries))
-	for _, entry := range entries {
-		kind := "FILE"
-		if entry.IsDir {
-			kind = "DIR"
-		}
-		if entry.IsSymlink {
-			kind = "LINK"
-		}
-		size := formatSize(entry.Size)
-		if entry.IsDir {
-			size = "—"
-		}
-		rows = append(rows, tableRow{kind: kind, name: entry.Name, size: size, modified: formatLocalTime(entry.Modified), extra: entry.Mode.String()})
-	}
-	return m.renderFrame(width, height, title, m.renderTableLines(width-2, height-2, rows, m.localCursor, "MODIFIED", "MODE"), m.focus == FocusLocal)
+	return m.renderFrame(width, height, title, m.renderTreeLines(width-2, height-2, rows, m.localCursor, true), m.focus == FocusLocal)
 }
 
 func (m *Model) renderRemotePanel(width, height int) string {
-	title := fmt.Sprintf("REMOTE %s [%d]", m.remotePath(), len(m.filteredRemoteEntries()))
+	rows := m.remoteRows()
+	title := fmt.Sprintf("REMOTE TREE  DEST %s  [%d]", m.remotePath(), len(rows))
 	if m.remoteLoading {
 		return m.renderFrame(width, height, title, []string{m.styles().muted.Render("Loading document metadata…")}, m.focus == FocusRemote)
 	}
-	entries := m.filteredRemoteEntries()
-	rows := make([]tableRow, 0, len(entries))
-	for _, entry := range entries {
-		kind := "DOC"
-		size, modified, extra := "—", "—", "—"
-		if entry.IsDir {
-			kind = "DIR"
-		} else if entry.Invalid {
-			kind = "INVALID"
-		}
-		if entry.Document != nil {
-			size = formatSize(entry.Document.Size)
-			modified = formatRemoteTime(entry.Document.UpdatedAt)
-			extra = formatRemoteTime(entry.Document.CreatedAt)
-		}
-		rows = append(rows, tableRow{kind: kind, name: entry.Name, size: size, modified: modified, extra: extra, invalid: entry.Invalid})
-	}
-	return m.renderFrame(width, height, title, m.renderTableLines(width-2, height-2, rows, m.remoteCursor, "UPDATED", "CREATED"), m.focus == FocusRemote)
+	return m.renderFrame(width, height, title, m.renderTreeLines(width-2, height-2, rows, m.remoteCursor, false), m.focus == FocusRemote)
 }
 
 func (m *Model) remotePath() string {
@@ -1029,6 +1217,20 @@ func (m *Model) remotePath() string {
 		return "/"
 	}
 	return "/" + strings.Join(m.remoteDir, "/")
+}
+
+func (m *Model) ensureRemoteDestination() {
+	for len(m.remoteDir) > 0 && m.tree.Entries(m.remoteDir) == nil {
+		m.remoteDir = m.remoteDir[:len(m.remoteDir)-1]
+	}
+}
+
+func (m *Model) handleRemovedRemoteDirectory(dir []string) {
+	delete(m.remoteExpanded, remoteTreeKey(dir))
+	if sameRemotePath(m.remoteDir, dir) {
+		m.remoteDir = m.remoteDir[:len(m.remoteDir)-1]
+		m.selectRemoteRow(remoteTreeKey(m.remoteDir))
+	}
 }
 
 func (m *Model) selectCreatedRemoteFolder(created []string) bool {
@@ -1040,9 +1242,13 @@ func (m *Model) selectCreatedRemoteFolder(created []string) bool {
 			return false
 		}
 	}
-	name := created[len(created)-1]
-	for index, entry := range m.filteredRemoteEntries() {
-		if entry.IsDir && entry.Name == name {
+	if len(m.remoteDir) > 0 {
+		m.remoteExpanded[remoteTreeKey(m.remoteDir)] = true
+	}
+	key := remoteTreeKey(created)
+	rows := m.remoteRows()
+	for index, row := range rows {
+		if row.key == key && row.isDir {
 			m.remoteCursor = index
 			return true
 		}
@@ -1050,68 +1256,108 @@ func (m *Model) selectCreatedRemoteFolder(created []string) bool {
 	return false
 }
 
-type tableRow struct {
-	kind     string
-	name     string
-	size     string
-	modified string
-	extra    string
-	invalid  bool
-}
+const (
+	closedFolderIcon = "󰉋"
+	openFolderIcon   = "󰝰"
+	documentIcon     = "󰈙"
+	symlinkIcon      = "󰌷"
+	invalidIcon      = "󰧺"
+	destinationIcon  = "󰜷"
+	cursorIcon       = "▌"
+)
 
-func (m *Model) renderTableLines(width, height int, rows []tableRow, cursor int, timeLabel, extraLabel string) []string {
+func (m *Model) renderTreeLines(width, height int, rows []treeRow, cursor int, local bool) []string {
 	styles := m.styles()
-	wide := m.wide && width >= 58
-	lines := []string{styles.tableHeader.Render(padDisplay(tableHeader(width, wide, timeLabel, extraLabel), width))}
-	if height <= 1 {
-		return lines
-	}
+	contentWidth := max(1, width-1)
 	if len(rows) == 0 {
-		lines = append(lines, styles.muted.Render("(empty)"))
-		return padLines(lines, height)
+		return padLines([]string{" " + styles.muted.Render("(empty)")}, height)
 	}
-	visible := height - 1
+	cursor = clampCursor(cursor, len(rows))
+	visible := max(1, height)
 	showPosition := len(rows) > visible
 	if showPosition && visible > 1 {
 		visible--
 	}
-	start, end := tableWindow(cursor, len(rows), visible)
+	start, end := treeWindow(cursor, len(rows), visible)
+	lines := make([]string, 0, height)
 	for index := start; index < end; index++ {
-		line := padDisplay(renderTableRow(width, wide, rows[index]), width)
-		if index == cursor {
-			line = styles.selected.Render(line)
-		} else if rows[index].invalid {
-			line = styles.error.Render(line)
+		plain, line := m.renderTreeRow(rows[index], local)
+		if rows[index].invalid {
+			line = styles.error.Render(padDisplay(fit(plain, contentWidth), contentWidth))
 		} else {
-			line = styles.tableData.Render(line)
+			line = padDisplay(fitStyled(line, contentWidth), contentWidth)
 		}
-		lines = append(lines, line)
+		gutter := " "
+		if index == cursor {
+			gutter = styles.cursor.Render(cursorIcon)
+		}
+		lines = append(lines, gutter+line)
 	}
 	if showPosition {
-		lines = append(lines, styles.muted.Render(fmt.Sprintf("… %d/%d", cursor+1, len(rows))))
+		lines = append(lines, " "+styles.muted.Render(fmt.Sprintf("… %d/%d", cursor+1, len(rows))))
 	}
 	return padLines(lines, height)
 }
 
-func tableHeader(width int, wide bool, timeLabel, extraLabel string) string {
-	if wide {
-		nameWidth := max(8, width-42)
-		return fmt.Sprintf("%-5s %-*s %9s %-12s %-12s", "TYPE", nameWidth, "NAME", "SIZE", timeLabel, extraLabel)
+func (m *Model) renderTreeRow(row treeRow, local bool) (string, string) {
+	styles := m.styles()
+	var prefix strings.Builder
+	for _, last := range row.ancestorLasts {
+		if last {
+			prefix.WriteString("  ")
+		} else {
+			prefix.WriteString("│ ")
+		}
 	}
-	nameWidth := max(6, width-29)
-	return fmt.Sprintf("%-5s %-*s %9s %-12s", "TYPE", nameWidth, "NAME", "SIZE", timeLabel)
+	if row.last {
+		prefix.WriteString("└─ ")
+	} else {
+		prefix.WriteString("├─ ")
+	}
+
+	icon, iconStyle, nameStyle := documentIcon, styles.file, styles.file
+	if row.invalid {
+		icon, iconStyle, nameStyle = invalidIcon, styles.error, styles.error
+	} else if row.isSymlink {
+		icon, iconStyle, nameStyle = symlinkIcon, styles.symlink, styles.symlink
+	} else if row.isDir {
+		expanded := m.remoteExpanded[row.key]
+		if local {
+			expanded = m.localExpanded[row.key]
+		}
+		if expanded {
+			icon = openFolderIcon
+		} else {
+			icon = closedFolderIcon
+		}
+		iconStyle, nameStyle = styles.directory, styles.directory
+	}
+
+	marker := ""
+	if !local && row.isDir && sameRemotePath(row.remotePath, m.remoteDir) {
+		marker = "  " + destinationIcon + " DEST"
+	}
+	plain := prefix.String() + icon + " " + displayName(row.name) + marker
+	styled := styles.treeGuide.Render(prefix.String()) + iconStyle.Render(icon+" ") + nameStyle.Render(displayName(row.name))
+	if marker != "" {
+		styled += styles.destination.Render(marker)
+	}
+	return plain, styled
 }
 
-func renderTableRow(width int, wide bool, row tableRow) string {
-	if wide {
-		nameWidth := max(8, width-42)
-		return fmt.Sprintf("%-5s %-*s %9s %-12s %-12s", fit(row.kind, 5), nameWidth, fit(row.name, nameWidth), fit(row.size, 9), fit(row.modified, 12), fit(row.extra, 12))
+func sameRemotePath(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	nameWidth := max(6, width-29)
-	return fmt.Sprintf("%-5s %-*s %9s %-12s", fit(row.kind, 5), nameWidth, fit(row.name, nameWidth), fit(row.size, 9), fit(row.modified, 12))
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
-func tableWindow(cursor, count, visible int) (int, int) {
+func treeWindow(cursor, count, visible int) (int, int) {
 	visible = max(1, visible)
 	if count <= visible {
 		return 0, count
@@ -1187,15 +1433,7 @@ func (m *Model) renderModal() string {
 	styles := m.styles()
 	switch m.mode {
 	case modeHelp:
-		text := strings.Join([]string{
-			"Keyboard help",
-			"Tab switch pane  •  arrows/jk move  •  Enter/right/l open directory",
-			"Backspace/left/h parent  •  / filter  •  w compact/wide",
-			"F5 copy selected file  •  d details  •  Ctrl+D archive remote document",
-			"Remote: n new folder; Ctrl+D deletes an empty opfm marker folder permanently",
-			"r refresh  •  s sign in  •  q/Ctrl+C quit  •  Esc close",
-		}, "\n")
-		return styles.modal.Render(text)
+		return m.renderHelp()
 	case modeDetails:
 		if m.details == nil {
 			return ""
@@ -1227,6 +1465,33 @@ func (m *Model) renderModal() string {
 	return ""
 }
 
+func (m *Model) renderHelp() string {
+	styles := m.styles()
+	type binding struct {
+		key   string
+		label string
+	}
+	rows := [][2]binding{
+		{{"Tab", "Switch pane"}, {"↑/↓, j/k", "Move selection"}},
+		{{"Enter, →, l", "Toggle folder"}, {"←, h", "Close / select parent"}},
+		{{"Backspace", "Destination parent"}, {"/", "Filter current tree"}},
+		{{"d", "Safe details"}, {"F5", "Copy selected file"}},
+		{{"n", "New child folder (remote)"}, {"Ctrl+D", "Archive / delete marker"}},
+		{{"r", "Refresh remote"}, {"s", "Sign in"}},
+		{{"?", "Close help"}, {"q, Ctrl+C", "Quit"}},
+	}
+	const columnWidth = 34
+	bindingText := func(item binding) string {
+		return styles.shortcutKey.Render("<"+item.key+">") + " " + styles.shortcutLabel.Render(item.label)
+	}
+	lines := []string{styles.titleActive.Render("Keyboard shortcuts"), ""}
+	for _, row := range rows {
+		left := padDisplay(bindingText(row[0]), columnWidth)
+		lines = append(lines, left+"  "+bindingText(row[1]))
+	}
+	return styles.modal.Render(strings.Join(lines, "\n"))
+}
+
 func (m *Model) styles() uiStyles {
 	return uiStyles{
 		contextLabel:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")),
@@ -1238,13 +1503,16 @@ func (m *Model) styles() uiStyles {
 		shortcutKey:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")),
 		shortcutLabel:   lipgloss.NewStyle().Foreground(lipgloss.Color("255")),
 		input:           lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51")),
-		frameActive:     lipgloss.NewStyle().Foreground(lipgloss.Color("51")),
-		frameIdle:       lipgloss.NewStyle().Foreground(lipgloss.Color("24")),
-		titleActive:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51")),
-		titleIdle:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245")),
-		tableHeader:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")),
-		tableData:       lipgloss.NewStyle().Foreground(lipgloss.Color("81")),
-		selected:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51")).Underline(true),
+		frameActive:     lipgloss.NewStyle().Foreground(lipgloss.Color("#8fb6ff")),
+		frameIdle:       lipgloss.NewStyle().Foreground(lipgloss.Color("#3e4958")),
+		titleActive:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#a5c4ff")),
+		titleIdle:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7b879d")),
+		treeGuide:       lipgloss.NewStyle().Foreground(lipgloss.Color("#3e4958")),
+		directory:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8fb6ff")),
+		file:            lipgloss.NewStyle().Foreground(lipgloss.Color("#b9b7cf")),
+		symlink:         lipgloss.NewStyle().Foreground(lipgloss.Color("#9ba7bb")),
+		destination:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5dd68b")),
+		cursor:          lipgloss.NewStyle().Foreground(lipgloss.Color("#5dd68b")),
 		muted:           lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		status:          lipgloss.NewStyle().Foreground(lipgloss.Color("220")),
 		footerTagActive: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Underline(true),
@@ -1269,9 +1537,12 @@ type uiStyles struct {
 	frameIdle       lipgloss.Style
 	titleActive     lipgloss.Style
 	titleIdle       lipgloss.Style
-	tableHeader     lipgloss.Style
-	tableData       lipgloss.Style
-	selected        lipgloss.Style
+	treeGuide       lipgloss.Style
+	directory       lipgloss.Style
+	file            lipgloss.Style
+	symlink         lipgloss.Style
+	destination     lipgloss.Style
+	cursor          lipgloss.Style
 	muted           lipgloss.Style
 	status          lipgloss.Style
 	footerTagActive lipgloss.Style

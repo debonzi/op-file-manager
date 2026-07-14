@@ -107,6 +107,9 @@ func TestCreateRemoteFolderUsesCurrentRemoteDirectory(t *testing.T) {
 	if model.pendingCreatedDir != nil || model.status != "Remote folder created; selected /projects/api" {
 		t.Fatalf("pending = %#v, status = %q", model.pendingCreatedDir, model.status)
 	}
+	if !model.remoteExpanded["projects"] {
+		t.Fatal("parent folder was not expanded to reveal the created folder")
+	}
 }
 
 func TestCreatedFolderSelectionIsClearedWhenRefreshFails(t *testing.T) {
@@ -177,6 +180,8 @@ func TestCtrlDDeletesOnlyEmptyDirectoryMarker(t *testing.T) {
 	model.remoteLoading = false
 	model.remoteDir = []string{"projects"}
 	model.tree = domain.BuildTree([]domain.Document{{ID: "marker", Title: "projects/api/", Tags: []string{domain.DirectoryMarkerTag}}})
+	model.remoteExpanded["projects"] = true
+	model.remoteCursor = 1
 
 	_, command := model.handleKey("ctrl+d", "")
 	if command != nil || model.mode != modeConfirmRemoval || model.removal == nil || model.removal.kind != deleteDirectoryMarker {
@@ -215,7 +220,7 @@ func TestFilterIsScopedToFocusedPaneAndEscapeClearsIt(t *testing.T) {
 	}
 }
 
-func TestViewRendersContextualTableAndActions(t *testing.T) {
+func TestViewRendersContextualTreeAndActions(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, ".env"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -229,10 +234,205 @@ func TestViewRendersContextualTableAndActions(t *testing.T) {
 	model.remoteLoading = false
 	model.tree = domain.BuildTree([]domain.Document{{ID: "doc", Title: ".env", Size: 12, UpdatedAt: "2026-07-14T00:00:00Z"}})
 	content := ansiEscapePattern.ReplaceAllString(model.View().Content, "")
-	for _, wanted := range []string{"ACCOUNT: Personal", "VAULT: Secrets", "SESSION: CONNECTED", "LOCAL:", "REMOTE:", "LOCAL . [1]", "REMOTE / [1]", "TYPE", "<F5> Upload", "<d> Details", "OPFM", "<local>", "<remote>"} {
+	for _, wanted := range []string{"ACCOUNT: Personal", "VAULT: Secrets", "SESSION: CONNECTED", "LOCAL:", "REMOTE:", "LOCAL TREE  DEST .  [1]", "REMOTE TREE  DEST /  [1]", documentIcon, "<F5> Upload", "<Enter> Toggle", "<d> Details", "OPFM", "<local>", "<remote>"} {
 		if !strings.Contains(content, wanted) {
 			t.Fatalf("view does not contain %q:\n%s", wanted, content)
 		}
+	}
+}
+
+func TestTreeCursorUsesGutterWithoutPaintingTheSelectedRow(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "folder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := localfs.NewRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestModel(t, opclient.New("op"), root)
+	rows, err := model.localRows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := model.renderTreeLines(48, 4, rows, 0, true)
+	if len(lines) == 0 {
+		t.Fatal("tree did not render a selected row")
+	}
+	line := lines[0]
+	if plain := ansiEscapePattern.ReplaceAllString(line, ""); !strings.HasPrefix(plain, cursorIcon+"└─ "+closedFolderIcon+" folder") {
+		t.Fatalf("cursor gutter line = %q", plain)
+	}
+	if !strings.Contains(line, model.styles().cursor.Render(cursorIcon)) {
+		t.Fatalf("cursor did not use the green gutter style: %q", line)
+	}
+	if !strings.Contains(line, model.styles().directory.Render(closedFolderIcon+" ")) {
+		t.Fatalf("selected folder lost its normal directory color: %q", line)
+	}
+	if strings.Contains(line, "\x1b[4m") || strings.Contains(line, "\x1b[48;") {
+		t.Fatalf("selected row used underline or background: %q", line)
+	}
+}
+
+func TestHelpModalUsesAlignedShortcutGrid(t *testing.T) {
+	root, err := localfs.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestModel(t, opclient.New("op"), root)
+	model.mode = modeHelp
+	content := ansiEscapePattern.ReplaceAllString(model.renderModal(), "")
+	for _, wanted := range []string{
+		"Keyboard shortcuts",
+		"<Tab> Switch pane",
+		"<↑/↓, j/k> Move selection",
+		"<Backspace> Destination parent",
+		"<Ctrl+D> Archive / delete marker",
+		"<q, Ctrl+C> Quit",
+	} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("help modal does not contain %q:\n%s", wanted, content)
+		}
+	}
+	if strings.Contains(content, " • ") {
+		t.Fatalf("help modal retained the old inline format:\n%s", content)
+	}
+}
+
+func TestRemoteTreeToggleKeepsCollapsedDestination(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "secret.env"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := localfs.NewRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	model := newTestModel(t, opclient.NewWithRunner("op", runner), root)
+	model.focus = FocusRemote
+	model.remoteLoading = false
+	model.tree = domain.BuildTree([]domain.Document{{ID: "doc", Title: "projects/api/.env"}})
+
+	model.openSelected() // projects
+	model.remoteCursor = 1
+	model.openSelected() // projects/api
+	if got := strings.Join(model.remoteDir, "/"); got != "projects/api" {
+		t.Fatalf("opened remote destination = %q", got)
+	}
+	model.openSelected() // close projects/api
+	if got := strings.Join(model.remoteDir, "/"); got != "projects/api" {
+		t.Fatalf("collapsed remote destination = %q", got)
+	}
+	if model.remoteExpanded["projects/api"] {
+		t.Fatal("collapsed destination remained expanded")
+	}
+
+	model.focus = FocusLocal
+	_, command := model.prepareUpload()
+	if command == nil {
+		t.Fatal("upload did not start")
+	}
+	command()
+	if got := strings.Join(runner.args, " "); !strings.Contains(got, "--title projects/api/secret.env") {
+		t.Fatalf("upload did not use collapsed destination: %q", got)
+	}
+
+	model.width, model.height = 120, 20
+	content := ansiEscapePattern.ReplaceAllString(model.View().Content, "")
+	if !strings.Contains(content, destinationIcon+" DEST") {
+		t.Fatalf("tree view does not mark destination:\n%s", content)
+	}
+}
+
+func TestTreeFilterIncludesAncestorsWithoutChangingExpansion(t *testing.T) {
+	root, err := localfs.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestModel(t, opclient.New("op"), root)
+	model.tree = domain.BuildTree([]domain.Document{
+		{ID: "target", Title: "projects/api/target.env"},
+		{ID: "other", Title: "other.env"},
+	})
+	model.remoteFilter = "target"
+	rows := model.remoteRows()
+	if len(rows) != 3 {
+		t.Fatalf("filtered row count = %d: %#v", len(rows), rows)
+	}
+	if got := []string{rows[0].name, rows[1].name, rows[2].name}; strings.Join(got, "/") != "projects/api/target.env" {
+		t.Fatalf("filtered rows = %#v", rows)
+	}
+	if len(model.remoteExpanded) != 0 {
+		t.Fatalf("filter mutated expanded folders: %#v", model.remoteExpanded)
+	}
+	model.remoteFilter = ""
+	rows = model.remoteRows()
+	if len(rows) != 2 || rows[0].name != "projects" || rows[1].name != "other.env" {
+		t.Fatalf("cleared filter rows = %#v", rows)
+	}
+}
+
+func TestRemoteTreePreservesSelectionAcrossRefresh(t *testing.T) {
+	root, err := localfs.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestModel(t, opclient.New("op"), root)
+	model.remoteLoading = false
+	model.remoteExpanded["projects"] = true
+	model.tree = domain.BuildTree([]domain.Document{{ID: "first", Title: "projects/api/.env"}})
+	model.remoteCursor = 1 // projects/api
+
+	model.Update(documentsLoadedMsg{tree: domain.BuildTree([]domain.Document{
+		{ID: "first", Title: "projects/api/.env"},
+		{ID: "second", Title: "other.env"},
+	})})
+	selected, ok := model.selectedRemote()
+	if !ok || !selected.IsDir || selected.Name != "api" {
+		t.Fatalf("refresh selection = %#v", selected)
+	}
+}
+
+func TestLocalTreeToggleKeepsDownloadDestination(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "downloads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "downloads", "note.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := localfs.NewRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestModel(t, opclient.New("op"), root)
+	model.openSelected()
+	if model.localDir != "downloads" || !model.localExpanded["downloads"] {
+		t.Fatalf("opened local tree = dir %q expanded %#v", model.localDir, model.localExpanded)
+	}
+	model.openSelected()
+	if model.localDir != "downloads" || model.localExpanded["downloads"] {
+		t.Fatalf("collapsed local tree = dir %q expanded %#v", model.localDir, model.localExpanded)
+	}
+}
+
+func TestLocalTreeNeverExpandsSymlink(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "target"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(directory, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := localfs.NewRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestModel(t, opclient.New("op"), root)
+	model.openSelected()
+	if model.localExpanded["linked"] {
+		t.Fatal("symbolic link was expanded")
 	}
 }
 
