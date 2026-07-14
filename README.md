@@ -16,6 +16,13 @@ contents in the interface.
 > opfm is an early-stage project. Treat remote uploads, downloads, archival,
 > and folder-marker removal as real changes to your 1Password data.
 
+## AI-assisted development
+
+opfm is developed with help from AI agents. A human maintainer directs the
+work, reviews accepted changes, and remains responsible for the code and
+releases. See [AI-assisted development disclosure](AI_DISCLOSURE.md) for the
+project's transparency and safety commitments.
+
 ## Why opfm?
 
 The 1Password CLI can already store and retrieve Documents, but its document
