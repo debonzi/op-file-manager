@@ -1,5 +1,6 @@
 /bin/
 /dist/
+/opfm
 /coverage.out
 *.coverprofile
 *.prof

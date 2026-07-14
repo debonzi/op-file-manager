@@ -1,77 +1,175 @@
 # opfm
 
-`opfm` is a Linux terminal file manager for [1Password CLI](https://www.1password.dev/cli/). It projects Documents in one configured vault into a virtual tree whose paths are stored in Document titles, and copies individual regular files to or from an isolated local root.
+**A keyboard-first terminal file manager for 1Password Documents.**
+
+`opfm` puts a local filesystem tree beside a virtual tree backed by one
+1Password vault. It is intended for sensitive project files such as `.env`
+files, Kubernetes configurations, certificates, and API-key material: browse
+where the file belongs, then transfer it deliberately without exposing its
+contents in the interface.
+
+![The opfm two-pane browser](docs/screenshots/opfm-browser.png)
+
+![The opfm keyboard shortcut overlay](docs/screenshots/opfm-help.png)
 
 > [!WARNING]
-> **Active development:** opfm is under active development and may undergo significant, including breaking, changes. It is not yet considered stable.
+> opfm is an early-stage project. Treat remote uploads, downloads, archival,
+> and folder-marker removal as real changes to your 1Password data.
 
-## Requirements
+## Why opfm?
+
+The 1Password CLI can already store and retrieve Documents, but its document
+titles are a flat namespace. `opfm` gives those titles a file-manager workflow:
+
+- navigate a project directory and a vault side by side;
+- arrange remote Documents into an intuitive folder tree;
+- choose destinations instead of encoding a remote path in a local filename;
+- upload or download one selected regular file at a time; and
+- keep file contents out of listings, previews, status messages, and logs.
+
+The interface is deliberately keyboard-oriented and inspired by tools such as
+terminal file managers and Kubernetes TUIs: persistent context, compact action
+hints, visible panes, and a shortcut overlay when needed.
+
+## Quick start
+
+### Requirements
 
 - Linux
-- Terminal with at least 80×20 cells
-- Terminal using a Nerd Font (for file and folder icons)
-- Go 1.25 or later to build
-- 1Password CLI with `document` commands available
-- A manually configured 1Password account for headless sign-in, or an active `op` session
+- Go 1.25 or newer
+- [1Password CLI (`op`)](https://developer.1password.com/docs/cli/)
+- A 1Password account that can create and read Documents in the chosen vault
 
-## Build and start
+### Build and configure
 
 ```sh
+git clone https://github.com/debonzi/op-file-manager.git
+cd op-file-manager
 go build -o opfm ./cmd/opfm
+
+# Choose an existing vault or create one during setup.
 ./opfm init
+```
+
+Start `opfm` in the directory you want to browse locally:
+
+```sh
+./opfm
+# or
 ./opfm /path/to/project
 ```
 
-`opfm init` signs in through the installed `op` CLI when needed, lets you choose an existing vault or create a new one, and stores the selected account and vault IDs in `$XDG_CONFIG_HOME/opfm/config.toml` (or `~/.config/opfm/config.toml`). It never stores a session token.
+If 1Password has not been authenticated for the current process, press `s` in
+the TUI. `opfm` delegates authentication to `op` and requests the normal
+1Password CLI sign-in flow.
 
-At runtime, `opfm` inherits an existing 1Password CLI session or signs in through the installed `op` CLI. For manual sessions it resolves the account shorthand and supplies the returned token only to child `op` processes as `OP_SESSION_<shorthand>`; the token is held only in memory.
+## How the remote tree works
 
-## Navigation
+1Password Documents are the source of truth. `opfm` maps a slash-separated
+Document title to a virtual relative path:
+
+```text
+Document title                 Shown in opfm
+-----------------------------  ---------------------------
+projects/api/.env              projects/
+                                └── api/
+                                    └── .env
+clusters/staging/config.yaml   clusters/
+                                └── staging/
+                                    └── config.yaml
+```
+
+Folders that contain Documents are inferred. When you create an otherwise
+empty remote folder with `n`, opfm stores a small tagged **directory marker**
+Document so the folder persists. Markers are hidden from normal browsing and
+can only be permanently removed when they are empty and you confirm the action.
+
+This means the remote side behaves like a hierarchy without pretending that
+1Password itself is a POSIX filesystem.
+
+## Everyday workflow
+
+1. Start in (or pass) your local project directory.
+2. Use `Tab` to focus the local or remote pane, then navigate to the desired
+   file and remote destination folder.
+3. Press `F5` to transfer the selected local file to the remote destination,
+   or the selected remote Document to the local destination.
+4. Confirm destructive operations. Remote Document deletion is archival;
+   empty folder-marker deletion is permanent after confirmation.
+
+The most useful shortcuts are always shown in the action bar. Press `?` for the
+complete in-app reference.
 
 | Key | Action |
 | --- | --- |
-| `Tab` | Switch panel |
-| arrows or `j`/`k` | Select entry |
-| `Enter`, `→`, or `l` | Toggle the selected folder; opening it also makes it the active destination for that panel |
-| `←` or `h` | Close the selected folder, or select its parent when it is already closed |
-| `Backspace` | Move the active local/remote destination to its parent |
-| `/` | Filter the focused tree; matching entries and their ancestors remain visible; `Esc` clears it |
-| `d` | Show safe metadata for the selected item |
-| `F5` | Copy selected file to the other panel's active destination |
-| `n` (remote panel) | Create a child folder in the active remote destination |
-| `Ctrl+D` (remote panel) | Archive a Document, or permanently remove a selected empty marker folder |
+| `Tab` | Switch active pane |
+| `↑`/`↓` or `j`/`k` | Move selection |
+| `Enter`, `→`, or `l` | Expand/collapse a folder; select it as the active destination |
+| `←` or `h` | Collapse the folder or select its parent |
+| `Backspace` | Make the destination its parent folder |
+| `F5` | Copy the selected file between panes |
+| `n` | Create a remote folder marker |
+| `Ctrl+D` | Archive a remote Document or remove an empty folder marker |
+| `/` | Filter the current tree, preserving matching ancestors |
+| `d` | Show safe metadata for the selected Document |
 | `r` | Refresh remote metadata |
-| `s` | Sign in through 1Password CLI |
-| `?` | Show keyboard help |
-| `q` | Quit |
+| `s` | Sign in to 1Password |
+| `?` | Open/close keyboard help |
+| `q` or `Ctrl+C` | Quit |
 
-An existing destination is never replaced until `y` or `Enter` confirms the modal. Each pane is a rooted tree: opening a local folder selects the destination for downloads, while opening a remote folder selects the destination for uploads and new folders. A remote destination stays active when its branch is later closed and is marked `DEST` in the tree.
+## Safety and privacy
 
-## Appearance
+- `internal/opclient` is the only part of opfm that executes the `op` CLI.
+- The TUI never reads, previews, prints, or logs Document contents.
+- Uploads accept regular local files only. Symlinks are refused.
+- Downloads are created with restrictive permissions and avoid unsafe symlink
+  replacement.
+- The local browser is scoped to the root passed when starting opfm.
+- Account and vault identifiers are stored in XDG configuration; session tokens
+  remain only in process memory and are cleared when opfm exits.
 
-opfm always inherits the terminal background, including terminal transparency. The main view keeps account, vault, session, and both active paths visible above two framed Neo-tree-style file trees. The tree uses periwinkle folders, lavender files, muted blue-gray guides, and a green left gutter for the selected row; it never paints an opaque background. Nerd Font icons distinguish open/closed folders, documents, symbolic links, and invalid items; a compact ASCII opfm mark appears at wide terminal sizes.
+These choices reduce accidental disclosure, but they do not replace your
+organization's secret-management practices or a review of each transfer.
 
-## Remote-path convention
+## Configuration and authentication
 
-Every file created by opfm is a 1Password Document. Its title is its virtual, relative POSIX path, such as `projects/api/dev/.env`; the Document file name is `.env`. While the local pane has focus, `F5` uploads the selected local file to the directory currently open in the remote pane, so it is not necessary (or useful) to encode a remote path in the local filename.
+`opfm init` writes configuration under the XDG configuration directory (usually
+`~/.config/opfm`). It stores only the selected 1Password account and vault IDs.
+It can also create a new vault during setup.
 
-Paths may contain up to 200 Unicode code points and cannot be absolute or include empty, `.` or `..` segments. Documents with invalid or duplicate titles remain visible in the remote pane but are read-only in opfm. Directories containing files are inferred from titles; empty directories need the explicit marker described below.
+For authentication, opfm honors the selected account and a valid CLI session
+when one exists. Otherwise, `s` invokes the regular 1Password CLI sign-in
+process. It never persists the resulting session token.
 
-To persist an empty remote directory, focus the remote pane, open its parent in the tree, and press `n`. opfm creates a zero-content Document titled `directory/`, with the file name `.opfm-directory` and the tag `opfm:directory-marker`. Those marker Documents are never displayed as files. You can create a nested structure one level at a time; after each successful creation opfm keeps the parent as the active destination, expands it, and selects the new directory. `Ctrl+D` permanently deletes only a selected marker directory that is empty—never a regular Document, an implied directory, or a directory containing children. On a regular remote Document, `Ctrl+D` archives it in 1Password instead of deleting it permanently.
+## Current scope
 
-## Safety boundaries
+opfm currently focuses on the narrow, safer workflow of individual file
+transfers between a local directory tree and 1Password Documents. In particular:
 
-- The local pane cannot leave the root passed to `opfm`.
-- Only regular local files can be uploaded; symbolic links are refused.
-- Downloads refuse to overwrite symbolic links and use 1Password CLI's `0600` file mode.
-- The TUI lists metadata only. It never previews Document content, writes content to logs, or uses a shell to invoke `op`.
+- it is a Linux TUI, not a mounted filesystem;
+- it manages one configured vault at a time;
+- it does not preview or edit secret contents; and
+- virtual folders are represented by title prefixes and optional marker
+  Documents.
+
+Feedback, bug reports, and contributions that keep those safety boundaries
+clear are welcome.
 
 ## Development
 
+Run the full validation suite before submitting a change:
+
 ```sh
-make test
-make vet
-make build
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./cmd/opfm
 ```
 
-The test suite uses a fake `op` runner; it does not access a 1Password account.
+For interactive checks, run the built binary inside `tmux`. Never include
+session tokens, passwords, document contents, or other secret material in
+issues, logs, tests, screenshots, or commit messages.
+
+## License
+
+See [LICENSE](LICENSE).
