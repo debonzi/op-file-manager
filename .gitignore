@@ -1,0 +1,14 @@
+/bin/
+/dist/
+/coverage.out
+*.coverprofile
+*.prof
+*.test
+
+# Local secrets and developer configuration
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
