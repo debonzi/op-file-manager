@@ -234,7 +234,7 @@ func TestViewRendersContextualTreeAndActions(t *testing.T) {
 	model.remoteLoading = false
 	model.tree = domain.BuildTree([]domain.Document{{ID: "doc", Title: ".env", Size: 12, UpdatedAt: "2026-07-14T00:00:00Z"}})
 	content := ansiEscapePattern.ReplaceAllString(model.View().Content, "")
-	for _, wanted := range []string{"ACCOUNT: Personal", "VAULT: Secrets", "SESSION: CONNECTED", "LOCAL:", "REMOTE:", "LOCAL TREE  DEST .  [1]", "REMOTE TREE  DEST /  [1]", documentIcon, "<F5> Upload", "<Enter> Toggle", "<d> Details", "OPFM", "<local>", "<remote>"} {
+	for _, wanted := range []string{"ACCOUNT: Personal", "VAULT: Secrets", "SESSION: CONNECTED", "LOCAL:", "REMOTE:", "LOCAL TREE  DEST .  [1]", "REMOTE TREE  DEST /  [1]", documentIcon, "<F5> Upload", "<Enter> Toggle", "<d> Details", "____  ____  ________", "<local>", "<remote>"} {
 		if !strings.Contains(content, wanted) {
 			t.Fatalf("view does not contain %q:\n%s", wanted, content)
 		}
@@ -461,7 +461,7 @@ func TestLogoIsResponsiveAndPanelsAreFramed(t *testing.T) {
 	model.remoteLoading = false
 	model.width, model.height = 120, 24
 	wide := ansiEscapePattern.ReplaceAllString(model.View().Content, "")
-	for _, wanted := range []string{"OPFM", "┌─ LOCAL", "┌─ REMOTE", "└"} {
+	for _, wanted := range []string{"____  ____  ________", "/ __ \\/ __ \\/ ____", "\\____/_/   /_/   /_/", "┌─ LOCAL", "┌─ REMOTE", "└"} {
 		if !strings.Contains(wide, wanted) {
 			t.Fatalf("wide view does not contain %q:\n%s", wanted, wide)
 		}
@@ -469,7 +469,7 @@ func TestLogoIsResponsiveAndPanelsAreFramed(t *testing.T) {
 
 	model.width = logoMinimumWidth - 1
 	compact := ansiEscapePattern.ReplaceAllString(model.View().Content, "")
-	if strings.Contains(compact, "OPFM") {
+	if strings.Contains(compact, "____  ____  ________") {
 		t.Fatalf("compact view unexpectedly rendered the logo:\n%s", compact)
 	}
 }

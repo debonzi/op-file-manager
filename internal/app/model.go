@@ -1029,10 +1029,11 @@ const (
 	logoMinimumWidth      = 100
 )
 
-const opfmLogo = `     .----------.
-    /   OPFM   \
-   |   VAULT   |
-    '----o----'`
+const opfmLogo = `   ____  ____  ________  ___
+  / __ \/ __ \/ ____/  |/  /
+ / / / / /_/ / /_  / /|_/ /
+/ /_/ / ____/ __/ / /  / /
+\____/_/   /_/   /_/  /_/`
 
 func (m *Model) View() tea.View {
 	if m.width > 0 && (m.width < minimumTerminalWidth || m.height < minimumTerminalHeight) {
@@ -1103,15 +1104,21 @@ func (m *Model) renderHeader(width int) string {
 	if !showLogo {
 		return strings.Join(lines, "\n")
 	}
-	for index := range lines {
-		lines[index] = padDisplay(lines[index], leftWidth)
+	lineCount := max(len(lines), len(logoLines))
+	headerLines := make([]string, 0, lineCount)
+	for index := 0; index < lineCount; index++ {
+		line := ""
+		if index < len(lines) {
+			line = lines[index]
+		}
+		line = padDisplay(line, leftWidth)
 		logo := ""
 		if index < len(logoLines) {
 			logo = styles.logo.Render(logoLines[index])
 		}
-		lines[index] += "   " + logo
+		headerLines = append(headerLines, line+"   "+logo)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(headerLines, "\n")
 }
 
 func (m *Model) contextLine(width int, label, value string, valueStyle lipgloss.Style) string {
@@ -1499,7 +1506,7 @@ func (m *Model) styles() uiStyles {
 		session:         lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")),
 		localPath:       lipgloss.NewStyle().Foreground(lipgloss.Color("81")),
 		remotePath:      lipgloss.NewStyle().Foreground(lipgloss.Color("13")),
-		logo:            lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")),
+		logo:            lipgloss.NewStyle().Foreground(lipgloss.Color("#8fb6ff")),
 		shortcutKey:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")),
 		shortcutLabel:   lipgloss.NewStyle().Foreground(lipgloss.Color("255")),
 		input:           lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51")),
